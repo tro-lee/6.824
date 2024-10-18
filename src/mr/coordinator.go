@@ -2,34 +2,24 @@ package mr
 
 import (
 	"encoding/gob"
-	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
-	"sort"
+	"path/filepath"
 	"sync"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	mapTasks    chan *MapTask
-	reduceTasks chan *ReduceTask
-
-	genReduceTask SyncTask
-
-	intermediate chan KeyValue
-	outputs      chan string
+	mapTasks         []*Task[*MapTaskContent]
+	mapTasksDoing    []*Task[*MapTaskContent]
+	reduceTasks      []*Task[*ReduceTaskContent]
+	reduceTasksDoing []*Task[*ReduceTaskContent]
 }
 
 // Your code here -- RPC handlers for the worker to call.
-type SyncTask struct {
-	HasDone bool
-	sync.Mutex
-}
-
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
@@ -50,7 +40,7 @@ func (c *Coordinator) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
-}
+} // 用于DoneMapTask上锁
 
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
@@ -58,81 +48,111 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
+	ret = len(c.reduceTasksDoing) == 0 && len(c.reduceTasks) == 0
 
 	return ret
 }
 
-func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
-	// assign Task
+var mu sync.Mutex
 
+// 若有可分配的Map任务，则分配Map任务
+// 若有可分配的Reduce任务，则分配Reduce任务
+// 若都没有，则表示已经完成
+// 为了防止争夺资源，采用Locker
+func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// MapTask分配
 	if len(c.mapTasks) >= 1 {
-		println("Assign MapTask")
-		fristMapTask := <-c.mapTasks
+		task := c.mapTasks[0]
+		reply.Task = &Task[interface{}]{
+			Id:      task.Id,
+			Type:    task.Type,
+			Content: task.Content,
+		}
 
-		reply.Type = "map"
-		reply.TaskContent = fristMapTask
+		c.mapTasks = c.mapTasks[1:]
+		c.mapTasksDoing = append(c.mapTasksDoing, task)
 		return nil
 	}
+
+	// 等待所有MapTaskDoing完成
+	for len(c.mapTasksDoing) >= 1 {
+	}
+
+	// ReduceTask分配
 	if len(c.reduceTasks) >= 1 {
-		println("Assign ReduceTask")
-		firstReduceTask := <-c.reduceTasks
+		task := c.reduceTasks[0]
+		reply.Task = &Task[interface{}]{
+			Id:      task.Id,
+			Type:    task.Type,
+			Content: task.Content,
+		}
 
-		reply.Type = "reduce"
-		reply.TaskContent = firstReduceTask
+		c.reduceTasks = c.reduceTasks[1:]
+		c.reduceTasksDoing = append(c.reduceTasksDoing, task)
 		return nil
 	}
 
-	// generate ReduceTasks
-	c.genReduceTask.Lock()
-	if len(c.mapTasks) == 0 && len(c.reduceTasks) == 0 && c.genReduceTask.HasDone {
-		print("Generate ReduceTasks")
-		// get temp
-		temp := []KeyValue{}
-		for {
-			if data, ok := <-c.intermediate; ok {
-				temp = append(temp, data)
-			} else {
-				break
-			}
-		}
-		sort.Sort(ByKey(temp))
-
-		// gen
-		i := 0
-		for i < len(temp) {
-			j := i + 1
-			for j < len(c.intermediate) && temp[j].Key == temp[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, temp[k].Value)
-			}
-
-			task := &ReduceTask{temp[i].Key, values}
-			c.reduceTasks <- task
-
-			i = j
-		}
-
-		// done
-		c.genReduceTask.HasDone = false
-		c.genReduceTask.Unlock()
+	// 等待所有ReduceTaskDoing完成
+	for len(c.reduceTasksDoing) >= 1 {
 	}
+
+	//
+	// 下面是收尾工作
+	// 停止worker任务
+	// 删除文件
+	//
+
+	reply.Task = &Task[interface{}]{
+		Id:      -1,
+		Type:    "stop",
+		Content: "",
+	}
+
+	matches, err := filepath.Glob("mr-map*")
+	if err != nil {
+		log.Fatal("匹配异常")
+	}
+	for _, match := range matches {
+		if err := os.Remove(match); err != nil {
+			log.Fatal("删除异常")
+		}
+	}
+
 	return nil
 }
+
+// 用于DoneMapTask上锁
+
+var doneMapMu sync.Mutex
 
 func (c *Coordinator) DoneMapTask(args *DoneMapTaskArgs, reply *DoneMapTaskReply) error {
-	for _, data := range args.Kva {
-		c.intermediate <- data
-	}
+	doneMapMu.Lock()
+	defer doneMapMu.Unlock()
 
-	fmt.Printf("完成%d，还剩%d", len(c.intermediate), len(c.mapTasks))
+	for i, v := range c.mapTasksDoing {
+		if v.Id == args.TaskId {
+			c.mapTasksDoing = append(c.mapTasksDoing[:i], c.mapTasksDoing[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
-func (c *Coordinator) DoneReduceTask(args *DoneReduceTaskArgs, reply interface{}) error {
-	c.outputs <- args.Output
+var doneReduceMu sync.Mutex
+
+func (c *Coordinator) DoneReduceTask(args *DoneReduceTaskArgs, reply *DoneReduceTaskReply) error {
+	doneReduceMu.Lock()
+	defer doneReduceMu.Unlock()
+
+	for i, v := range c.reduceTasksDoing {
+		if v.Id == args.TaskId {
+			c.reduceTasksDoing = append(c.reduceTasksDoing[:i], c.reduceTasksDoing[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
@@ -143,35 +163,42 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-	gob.Register(new(MapTask))
-	gob.Register(new(ReduceTask))
-	gob.Register(new(DoneMapTaskArgs))
-	gob.Register(new(DoneReduceTaskArgs))
 
-	// init channel
-	c.mapTasks = make(chan *MapTask, len(files))
-	c.reduceTasks = make(chan *ReduceTask, nReduce)
-	c.intermediate = make(chan KeyValue, 2048)
-	c.outputs = make(chan string, 1024)
+	// 初始化
+	// 注册接口
+	gob.Register(new(Task[interface{}]))
+	gob.Register(new(MapTaskContent))
+	gob.Register(new(ReduceTaskContent))
+	gob.Register(new(EmptyStruct))
 
-	// init maptask
-	for _, filename := range files {
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %v", filename)
+	c.mapTasks = []*Task[*MapTaskContent]{}
+	c.mapTasksDoing = []*Task[*MapTaskContent]{}
+	c.reduceTasks = []*Task[*ReduceTaskContent]{}
+	c.reduceTasksDoing = []*Task[*ReduceTaskContent]{}
+
+	// 生成所有mapTask
+	for i, filename := range files {
+		mapTask := Task[*MapTaskContent]{
+			Id:   i,
+			Type: "map",
+			Content: &MapTaskContent{
+				Filename: filename,
+				NReduce:  nReduce,
+			},
 		}
-		content, err := io.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", filename)
-		}
-		file.Close()
+		c.mapTasks = append(c.mapTasks, &mapTask)
+	}
 
-		mapTask := MapTask{
-			Filename: filename,
-			Content:  string(content),
+	// 生成所有reduceTask
+	for i := 0; i < nReduce; i++ {
+		reduceTask := Task[*ReduceTaskContent]{
+			Id:   len(files) + 10 + i,
+			Type: "reduce",
+			Content: &ReduceTaskContent{
+				FilenameNum: i,
+			},
 		}
-
-		c.mapTasks <- &mapTask
+		c.reduceTasks = append(c.reduceTasks, &reduceTask)
 	}
 
 	c.server()

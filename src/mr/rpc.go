@@ -25,36 +25,37 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-type TaskArgs struct {
+// Task
+type Task[Content any] struct {
+	Type    string
+	Id      int
+	Content Content
 }
 
-type TaskReply struct {
-	Type        string
-	TaskId      string
-	TaskContent interface{}
-}
-
-type MapTask struct {
+type MapTaskContent struct {
 	Filename string
-	Content  string
+	NReduce  int
 }
 
-type ReduceTask struct {
-	Key    string
-	Values []string
+type ReduceTaskContent struct {
+	FilenameNum int
+}
+
+type AssignTaskArgs EmptyStruct
+type AssignTaskReply struct {
+	Task *Task[interface{}]
 }
 
 type DoneMapTaskArgs struct {
-	Kva []KeyValue
+	TaskId int
 }
-
 type DoneReduceTaskArgs struct {
-	Output string
+	TaskId int
 }
 
-type EmptyReply struct{}
-type DoneMapTaskReply EmptyReply
-type DoneReduceTaskReply EmptyReply
+type EmptyStruct struct{}
+type DoneMapTaskReply EmptyStruct
+type DoneReduceTaskReply EmptyStruct
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

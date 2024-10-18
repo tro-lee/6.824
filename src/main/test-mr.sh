@@ -129,7 +129,7 @@ sleep 1
 
 # start multiple workers
 maybe_quiet $TIMEOUT ../mrworker ../../mrapps/indexer.so &
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/indexer.so
+maybe_quiet $TIMEOUT ../mrworker ../../mrapps/indexer.soestablished.
 
 sort mr-out* | grep . > mr-indexer-all
 if cmp mr-indexer-all mr-correct-indexer.txt
