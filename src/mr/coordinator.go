@@ -49,6 +49,17 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 	ret = len(c.reduceTasksDoing) == 0 && len(c.reduceTasks) == 0
+	if ret {
+		matches, err := filepath.Glob("mr-map*")
+		if err != nil {
+			log.Fatal("匹配异常")
+		}
+		for _, match := range matches {
+			if err := os.Remove(match); err != nil {
+				log.Fatal("删除异常")
+			}
+		}
+	}
 
 	return ret
 }
@@ -101,24 +112,12 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 
 	//
 	// 下面是收尾工作
-	// 停止worker任务
-	// 删除文件
 	//
 
 	reply.Task = &Task[interface{}]{
 		Id:      -1,
 		Type:    "stop",
 		Content: "",
-	}
-
-	matches, err := filepath.Glob("mr-map*")
-	if err != nil {
-		log.Fatal("匹配异常")
-	}
-	for _, match := range matches {
-		if err := os.Remove(match); err != nil {
-			log.Fatal("删除异常")
-		}
 	}
 
 	return nil

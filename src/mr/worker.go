@@ -118,7 +118,7 @@ func doReduceTask(task *Task[interface{}], reducef func(string, []string) string
 	//
 	file, err := os.Open("mr-map" + strconv.Itoa(reduceTask.FilenameNum))
 	if err != nil {
-		log.Fatal(err)
+		os.Exit(1)
 	}
 	content, _ := io.ReadAll(file)
 	file.Close()
